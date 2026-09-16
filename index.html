@@ -90,7 +90,7 @@ let latestRainTime = null;
 async function loadTrafficState() {
 
     const response = await fetch(
-        "traffic_live_state.csv?ts=" + Date.now(),
+        "https://raw.githubusercontent.com/calabashhh/guidedinsight-studio-site/main/traffic_live_state.csv?ts=" + Date.now(),
         { cache: "no-store" }
     );
 
