@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Hong Kong Live Traffic</title>
+
+<link
+  rel="stylesheet"
+  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+/>
+
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js">
+</script>
+
+<style>
+
+html, body {
+    height: 100%;
+    margin: 0;
+}
+
+#map {
+    height: 100%;
+    width: 100%;
+}
+
+.info,
+.legend {
+    background: white;
+    padding: 9px 11px;
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+    line-height: 1.45;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.35);
+    border-radius: 4px;
+}
+
+.legend-line {
+    display: inline-block;
+    width: 24px;
+    height: 4px;
+    margin-right: 7px;
+    vertical-align: middle;
+}
+
+.small {
+    font-size: 11px;
+    color: #666;
+}
+
+</style>
+</head>
+
+<body>
+
+<div id="map"></div>
+
+<script>
+
+const REFRESH_INTERVAL_MS = 120000;
+const STALE_AFTER_MINUTES = 10;
+
+const map = L.map("map").setView(
+    [22.32, 114.17],
+    11
+);
+
+L.tileLayer(
+    "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+    {
+        attribution:
+            '&copy; OpenStreetMap contributors &copy; CARTO'
+    }
+).addTo(map);
+
+
+let trafficState = new Map();
+let trafficLayer = null;
+let latestTrafficTime = null;
+let latestRainTime = null;
+
+
+// ----------------------------------------------------------
+// CSV reader
+// ----------------------------------------------------------
+
+async function loadTrafficState() {
+
+    const response = await fetch(
+        "traffic_live_state.csv?ts=" + Date.now(),
+        { cache: "no-store" }
+    );
+
+    if (!response.ok) {
+        throw new Error(
+            "Could not load traffic_live_state.csv"
+        );
+    }
+
+    const text = await response.text();
+    const lines = text.trim().split(/\r?\n/);
+
+    const headers = lines[0].split(",");
+    const records = new Map();
+
+    latestTrafficTime = null;
+    latestRainTime = null;
+
+    for (let i = 1; i < lines.length; i++) {
+
+        const values = lines[i].split(",");
+
+        const row = {};
+
+        headers.forEach((header, index) => {
+            row[header] = values[index] ?? "";
+        });
+
+        records.set(
+            String(row.ROUTE_ID),
+            row
+        );
+
+        if (!latestTrafficTime &&
+            row.traffic_date &&
+            row.traffic_time) {
+
+            latestTrafficTime =
+                row.traffic_date +
+                "T" +
+                row.traffic_time +
+                "+08:00";
+        }
+
+        if (!latestRainTime &&
+            row.rain_obs_time) {
+
+            latestRainTime =
+                row.rain_obs_time;
+        }
+    }
+
+    return records;
+}
+
+
+// ----------------------------------------------------------
+// Freshness
+// ----------------------------------------------------------
+
+function trafficAgeMinutes(row) {
+
+    if (!row ||
+        !row.traffic_date ||
+        !row.traffic_time) {
+
+        return Infinity;
+    }
+
+    const observation =
+        new Date(
+            row.traffic_date +
+            "T" +
+            row.traffic_time +
+            "+08:00"
+        );
+
+    return (
+        Date.now() - observation.getTime()
+    ) / 60000;
+}
+
+
+function isTrafficCurrent(row) {
+
+    return (
+        row &&
+        row.valid === "Y" &&
+        trafficAgeMinutes(row) <=
+            STALE_AFTER_MINUTES
+    );
+}
+
+
+// ----------------------------------------------------------
+// Road styling
+// ----------------------------------------------------------
+
+function speedColor(speed) {
+
+    if (speed < 20) return "#b2182b";
+    if (speed < 35) return "#ef8a62";
+    if (speed < 50) return "#fddbc7";
+    if (speed < 70) return "#67a9cf";
+
+    return "#2166ac";
+}
+
+
+function trafficStyle(feature) {
+
+    const routeId =
+        String(feature.properties.ROUTE_ID);
+
+    const row =
+        trafficState.get(routeId);
+
+    // Traffic-enabled road but no current usable reading
+    if (!isTrafficCurrent(row)) {
+
+        return {
+            color: "#777777",
+            weight: 2.2,
+            opacity: 0.75,
+            dashArray: "5,4"
+        };
+    }
+
+    const speed =
+        Number(row.speed_kmh);
+
+    return {
+        color: speedColor(speed),
+        weight: 3,
+        opacity: 0.95,
+        dashArray: null
+    };
+}
+
+
+// ----------------------------------------------------------
+// Popup content
+// ----------------------------------------------------------
+
+function popupContent(feature) {
+
+    const routeId =
+        String(feature.properties.ROUTE_ID);
+
+    const row =
+        trafficState.get(routeId);
+
+    let html =
+        `<b>Route ID:</b> ${routeId}`;
+
+    if (feature.properties.STREET_ENAME) {
+
+        html +=
+            `<br><b>Road:</b> ` +
+            feature.properties.STREET_ENAME;
+    }
+
+    if (!row) {
+
+        html +=
+            `<br><b>Status:</b> No current record`;
+
+        return html;
+    }
+
+
+    const age =
+        trafficAgeMinutes(row);
+
+
+    if (isTrafficCurrent(row)) {
+
+        html +=
+            `<br><b>Speed:</b> ` +
+            `${row.speed_kmh} km/h`;
+
+        html +=
+            `<br><b>Status:</b> Live`;
+
+    } else {
+
+        html +=
+            `<br><b>Status:</b> ` +
+            (
+                row.valid !== "Y"
+                ? "Reading unavailable"
+                : "Reading stale"
+            );
+
+        if (row.speed_kmh) {
+
+            html +=
+                `<br><b>Last speed:</b> ` +
+                `${row.speed_kmh} km/h`;
+        }
+    }
+
+
+    if (Number.isFinite(age)) {
+
+        html +=
+            `<br><b>Traffic age:</b> ` +
+            `${age.toFixed(1)} min`;
+    }
+
+
+    if (row.rain_est_mm_1h !== "") {
+
+        html +=
+            `<br><b>Estimated 1-hour rainfall:</b> ` +
+            `${Number(
+                row.rain_est_mm_1h
+            ).toFixed(1)} mm`;
+    }
+
+
+    html +=
+        `<br><b>Traffic observation:</b> ` +
+        `${row.traffic_date} ${row.traffic_time}`;
+
+
+    if (row.rain_obs_time) {
+
+        html +=
+            `<br><b>Rain observation:</b> ` +
+            row.rain_obs_time;
+    }
+
+    return html;
+}
+
+
+// ----------------------------------------------------------
+// Status control
+// ----------------------------------------------------------
+
+const info = L.control({
+    position: "topright"
+});
+
+info.onAdd = function() {
+
+    this._div =
+        L.DomUtil.create(
+            "div",
+            "info"
+        );
+
+    this.update();
+
+    return this._div;
+};
+
+
+info.update = function() {
+
+    if (!this._div) return;
+
+    let trafficText = "Unavailable";
+    let rainText = "Unavailable";
+
+    if (latestTrafficTime) {
+
+        const d =
+            new Date(latestTrafficTime);
+
+        const age =
+            (Date.now() -
+             d.getTime()) / 60000;
+
+        trafficText =
+            `${latestTrafficTime}` +
+            `<br>` +
+            `<span class="small">` +
+            `${age.toFixed(1)} min old` +
+            `</span>`;
+    }
+
+
+    if (latestRainTime) {
+
+        rainText =
+            latestRainTime;
+    }
+
+
+    this._div.innerHTML =
+        `<b>HK Live Traffic</b>` +
+        `<br><br>` +
+        `<b>Traffic:</b><br>` +
+        trafficText +
+        `<br><br>` +
+        `<b>Rainfall:</b><br>` +
+        rainText +
+        `<br><br>` +
+        `<span class="small">` +
+        `Map refreshes every 2 minutes` +
+        `</span>`;
+};
+
+info.addTo(map);
+
+
+// ----------------------------------------------------------
+// Legend
+// ----------------------------------------------------------
+
+const legend = L.control({
+    position: "bottomright"
+});
+
+legend.onAdd = function() {
+
+    const div =
+        L.DomUtil.create(
+            "div",
+            "legend"
+        );
+
+    div.innerHTML =
+        `<b>Current speed</b><br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#b2182b"></span>` +
+        `under 20 km/h<br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#ef8a62"></span>` +
+        `20–35 km/h<br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#fddbc7"></span>` +
+        `35–50 km/h<br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#67a9cf"></span>` +
+        `50–70 km/h<br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#2166ac"></span>` +
+        `70+ km/h<br><br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#777"></span>` +
+        `No current valid reading<br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#bbb"></span>` +
+        `No live-speed coverage`;
+
+    return div;
+};
+
+legend.addTo(map);
+
+
+// ----------------------------------------------------------
+// Initial map build
+// ----------------------------------------------------------
+
+async function buildMap() {
+
+    trafficState =
+        await loadTrafficState();
+
+
+    const backgroundResponse =
+        await fetch(
+            "roads_background_simplified_2m.geojson"
+        );
+
+    const backgroundData =
+        await backgroundResponse.json();
+
+
+    L.geoJSON(
+        backgroundData,
+        {
+            style: {
+                color: "#bbbbbb",
+                weight: 0.7,
+                opacity: 0.45
+            },
+
+            interactive: false
+        }
+    ).addTo(map);
+
+
+    const trafficResponse =
+        await fetch(
+            "traffic_overlay.geojson"
+        );
+
+    const trafficData =
+        await trafficResponse.json();
+
+
+    trafficLayer =
+        L.geoJSON(
+            trafficData,
+            {
+
+                style: trafficStyle,
+
+                onEachFeature:
+                    function(feature, layer) {
+
+                        layer.bindPopup(
+                            popupContent(feature)
+                        );
+                    }
+            }
+        ).addTo(map);
+
+
+    info.update();
+}
+
+
+// ----------------------------------------------------------
+// Refresh only changing data
+// ----------------------------------------------------------
+
+async function refreshLiveData() {
+
+    try {
+
+        const newState =
+            await loadTrafficState();
+
+        trafficState =
+            newState;
+
+
+        if (trafficLayer) {
+
+            trafficLayer.eachLayer(
+                function(layer) {
+
+                    layer.setStyle(
+                        trafficStyle(
+                            layer.feature
+                        )
+                    );
+
+                    layer.setPopupContent(
+                        popupContent(
+                            layer.feature
+                        )
+                    );
+                }
+            );
+        }
+
+
+        info.update();
+
+        console.log(
+            "Live traffic refreshed:",
+            new Date().toISOString()
+        );
+
+    } catch (error) {
+
+        console.error(
+            "Live refresh failed:",
+            error
+        );
+    }
+}
+
+
+// ----------------------------------------------------------
+// Start
+// ----------------------------------------------------------
+
+buildMap().then(() => {
+
+    setInterval(
+        refreshLiveData,
+        REFRESH_INTERVAL_MS
+    );
+
+});
+
+</script>
+
+</body>
+</html>
