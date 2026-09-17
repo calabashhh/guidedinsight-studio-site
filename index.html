@@ -242,20 +242,28 @@ function popupContent(feature) {
     const row =
         trafficState.get(routeId);
 
+    const roadName =
+        feature.properties.STREET_ENAME || "Unnamed road";
+
+
     let html =
-        `<b>Route ID:</b> ${routeId}`;
+        `<div style="min-width:220px;">` +
 
-    if (feature.properties.STREET_ENAME) {
+        `<div style="font-size:15px; font-weight:bold; margin-bottom:2px;">` +
+        `${roadName}` +
+        `</div>` +
 
-        html +=
-            `<br><b>Road:</b> ` +
-            feature.properties.STREET_ENAME;
-    }
+        `<div style="font-size:11px; color:#666; margin-bottom:8px;">` +
+        `Route ID ${routeId}` +
+        `</div>`;
+
 
     if (!row) {
 
         html +=
-            `<br><b>Status:</b> No current record`;
+            `<b>Traffic</b>` +
+            `<br>Status: No current record` +
+            `</div>`;
 
         return html;
     }
@@ -265,14 +273,23 @@ function popupContent(feature) {
         trafficAgeMinutes(row);
 
 
+    // ------------------------------------------------------
+    // Traffic
+    // ------------------------------------------------------
+
+    html +=
+        `<div style="border-top:1px solid #ccc; padding-top:6px;">` +
+        `<b>Traffic</b>`;
+
+
     if (isTrafficCurrent(row)) {
 
         html +=
-            `<br><b>Speed:</b> ` +
+            `<br><b>Current speed:</b> ` +
             `${row.speed_kmh} km/h`;
 
         html +=
-            `<br><b>Status:</b> Live`;
+            `<br><b>Status:</b> Current`;
 
     } else {
 
@@ -284,7 +301,7 @@ function popupContent(feature) {
                 : "Reading stale"
             );
 
-        if (row.speed_kmh) {
+        if (row.speed_kmh !== "") {
 
             html +=
                 `<br><b>Last speed:</b> ` +
@@ -293,35 +310,67 @@ function popupContent(feature) {
     }
 
 
+    html +=
+        `<br><b>Observation:</b> ` +
+        `${row.traffic_date} ${row.traffic_time}`;
+
+
     if (Number.isFinite(age)) {
 
         html +=
-            `<br><b>Traffic age:</b> ` +
+            `<br><b>Observation age:</b> ` +
             `${age.toFixed(1)} min`;
     }
 
 
-    if (row.rain_est_mm_1h !== "") {
+    html += `</div>`;
 
-        html +=
-            `<br><b>Estimated 1-hour rainfall:</b> ` +
-            `${Number(
-                row.rain_est_mm_1h
-            ).toFixed(1)} mm`;
-    }
 
+    // ------------------------------------------------------
+    // Rainfall
+    // ------------------------------------------------------
 
     html +=
-        `<br><b>Traffic observation:</b> ` +
-        `${row.traffic_date} ${row.traffic_time}`;
+        `<div style="border-top:1px solid #ccc; margin-top:7px; padding-top:6px;">` +
+        `<b>Rainfall</b>`;
+
+
+    if (
+        row.rain_est_mm_1h !== "" &&
+        Number.isFinite(Number(row.rain_est_mm_1h))
+    ) {
+
+        html +=
+            `<br><b>Estimated past hour:</b> ` +
+            `${Number(row.rain_est_mm_1h).toFixed(1)} mm`;
+
+    } else {
+
+        html +=
+            `<br><b>Estimated past hour:</b> Unavailable`;
+    }
 
 
     if (row.rain_obs_time) {
 
         html +=
-            `<br><b>Rain observation:</b> ` +
-            row.rain_obs_time;
+            `<br><b>Observation:</b> ` +
+            `${row.rain_obs_time}`;
     }
+
+
+    if (row.rain_stations_used) {
+
+        html +=
+            `<br><b>Stations used:</b> ` +
+            `${row.rain_stations_used}`;
+    }
+
+
+    html +=
+        `</div>` +
+        `</div>`;
+
 
     return html;
 }
