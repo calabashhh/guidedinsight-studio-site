@@ -81,7 +81,7 @@ let trafficState = new Map();
 let trafficLayer = null;
 let latestTrafficTime = null;
 let latestRainTime = null;
-
+let displayMode = "speed";
 
 // ----------------------------------------------------------
 // CSV reader
@@ -200,6 +200,18 @@ function speedColor(speed) {
 }
 
 
+function rainColor(rain) {
+
+    if (rain <= 0) return "#d7eaf7";
+    if (rain < 2) return "#9ecae1";
+    if (rain < 5) return "#6baed6";
+    if (rain < 15) return "#3182bd";
+    if (rain < 30) return "#08519c";
+
+    return "#08306b";
+}
+
+
 function trafficStyle(feature) {
 
     const routeId =
@@ -208,7 +220,34 @@ function trafficStyle(feature) {
     const row =
         trafficState.get(routeId);
 
-    // Traffic-enabled road but no current usable reading
+
+    if (displayMode === "rain") {
+
+        if (
+            !row ||
+            row.rain_est_mm_1h === "" ||
+            !Number.isFinite(Number(row.rain_est_mm_1h))
+        ) {
+
+            return {
+                color: "#666",
+                weight: 3,
+                opacity: 0.7
+            };
+        }
+
+        const rain =
+            Number(row.rain_est_mm_1h);
+
+        return {
+            color: rainColor(rain),
+            weight: 3,
+            opacity: 0.95,
+            dashArray: null
+        };
+    }
+
+
     if (!isTrafficCurrent(row)) {
 
         return {
@@ -228,7 +267,6 @@ function trafficStyle(feature) {
         dashArray: null
     };
 }
-
 
 // ----------------------------------------------------------
 // Popup content
@@ -446,10 +484,67 @@ info.update = function() {
 
 info.addTo(map);
 
+// ----------------------------------------------------------
+// Display mode control
+// ----------------------------------------------------------
+
+const modeControl = L.control({
+    position: "topleft"
+});
+
+modeControl.onAdd = function() {
+
+    const div =
+        L.DomUtil.create(
+            "div",
+            "info"
+        );
+
+    div.innerHTML =
+        `<b>Display</b><br>` +
+        `<select id="display-mode" ` +
+        `style="margin-top:5px; width:145px;">` +
+        `<option value="speed">Current speed</option>` +
+        `<option value="rain">Recent rainfall</option>` +
+        `</select>`;
+
+    L.DomEvent.disableClickPropagation(div);
+    L.DomEvent.disableScrollPropagation(div);
+
+    const select =
+        div.querySelector("#display-mode");
+
+    select.value =
+        displayMode;
+
+    select.addEventListener(
+        "change",
+        function() {
+
+            displayMode =
+                this.value;
+
+            if (trafficLayer) {
+
+                trafficLayer.setStyle(
+                    trafficStyle
+                );
+            }
+	    
+	    updateLegend();
+        }
+    );
+
+    return div;
+};
+
+modeControl.addTo(map);
 
 // ----------------------------------------------------------
 // Legend
 // ----------------------------------------------------------
+
+let legendDiv = null;
 
 const legend = L.control({
     position: "bottomright"
@@ -457,13 +552,61 @@ const legend = L.control({
 
 legend.onAdd = function() {
 
-    const div =
+    legendDiv =
         L.DomUtil.create(
             "div",
             "legend"
         );
 
-    div.innerHTML =
+    updateLegend();
+
+    return legendDiv;
+};
+
+
+function updateLegend() {
+
+    if (!legendDiv) return;
+
+
+    if (displayMode === "rain") {
+
+        legendDiv.innerHTML =
+            `<b>Estimated rainfall, past hour</b><br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#d7eaf7"></span>` +
+            `0 mm<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#9ecae1"></span>` +
+            `>0–2 mm<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#6baed6"></span>` +
+            `2–5 mm<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#3182bd"></span>` +
+            `5–15 mm<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#08519c"></span>` +
+            `15–30 mm<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#08306b"></span>` +
+            `30+ mm<br><br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#666"></span>` +
+            `Rainfall unavailable`;
+
+        return;
+    }
+
+
+    legendDiv.innerHTML =
         `<b>Current speed</b><br>` +
 
         `<span class="legend-line" ` +
@@ -493,12 +636,10 @@ legend.onAdd = function() {
         `<span class="legend-line" ` +
         `style="background:#bbb"></span>` +
         `No live-speed coverage`;
+}
 
-    return div;
-};
 
 legend.addTo(map);
-
 
 // ----------------------------------------------------------
 // Initial map build
