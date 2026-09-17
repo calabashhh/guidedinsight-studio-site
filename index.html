@@ -61,7 +61,7 @@ html, body {
 <script>
 
 const REFRESH_INTERVAL_MS = 120000;
-const STALE_AFTER_MINUTES = 10;
+const STALE_AFTER_MINUTES = 20;
 
 const map = L.map("map").setView(
     [22.32, 114.17],
@@ -212,10 +212,9 @@ function trafficStyle(feature) {
     if (!isTrafficCurrent(row)) {
 
         return {
-            color: "#777777",
-            weight: 2.2,
-            opacity: 0.75,
-            dashArray: "5,4"
+            color: "#888",
+            weight: 3,
+            opacity: 0.8
         };
     }
 
