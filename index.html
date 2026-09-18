@@ -212,6 +212,17 @@ function rainColor(rain) {
 }
 
 
+function relativeSpeedColor(diffPct) {
+
+    if (diffPct <= -30) return "#b2182b";
+    if (diffPct < -15) return "#ef8a62";
+    if (diffPct <= 15) return "#f7f7f7";
+    if (diffPct < 30) return "#67a9cf";
+
+    return "#2166ac";
+}
+
+
 function trafficStyle(feature) {
 
     const routeId =
@@ -248,6 +259,41 @@ function trafficStyle(feature) {
     }
 
 
+    if (displayMode === "relative") {
+
+        if (!isTrafficCurrent(row)) {
+
+            return {
+                color: "#777",
+                weight: 3,
+                opacity: 0.8
+            };
+        }
+
+        if (
+            row.speed_diff_pct === "" ||
+            !Number.isFinite(Number(row.speed_diff_pct))
+        ) {
+
+            return {
+                color: "#555",
+                weight: 3,
+                opacity: 0.8
+            };
+        }
+
+        const diffPct =
+            Number(row.speed_diff_pct);
+
+        return {
+            color: relativeSpeedColor(diffPct),
+            weight: 3,
+            opacity: 0.95,
+            dashArray: null
+        };
+    }
+
+
     if (!isTrafficCurrent(row)) {
 
         return {
@@ -271,6 +317,24 @@ function trafficStyle(feature) {
 // ----------------------------------------------------------
 // Popup content
 // ----------------------------------------------------------
+
+function baselineTypeLabel(type) {
+
+    if (type === "dow") {
+        return "Same weekday";
+    }
+
+    if (type === "day_type") {
+        return "Weekday/weekend";
+    }
+
+    if (type === "all") {
+        return "All days";
+    }
+
+    return "Unavailable";
+}
+
 
 function popupContent(feature) {
 
@@ -358,6 +422,92 @@ function popupContent(feature) {
         html +=
             `<br><b>Observation age:</b> ` +
             `${age.toFixed(1)} min`;
+    }
+
+
+    html += `</div>`;
+
+
+    // ------------------------------------------------------
+    // Time-matched baseline
+    // ------------------------------------------------------
+
+    html +=
+        `<div style="border-top:1px solid #ccc; margin-top:7px; padding-top:6px;">` +
+        `<b>Time-matched baseline</b>`;
+
+
+    if (
+        row.baseline_median_kmh !== "" &&
+        Number.isFinite(Number(row.baseline_median_kmh))
+    ) {
+
+        html +=
+            `<br><b>Median speed:</b> ` +
+            `${Number(row.baseline_median_kmh).toFixed(1)} km/h`;
+
+        if (
+            row.speed_diff_kmh !== "" &&
+            Number.isFinite(Number(row.speed_diff_kmh))
+        ) {
+
+            const diffKmh =
+                Number(row.speed_diff_kmh);
+
+            const diffPct =
+                Number(row.speed_diff_pct);
+
+            const diffKmhText =
+                `${diffKmh >= 0 ? "+" : ""}${diffKmh.toFixed(1)} km/h`;
+
+            const diffPctText =
+                Number.isFinite(diffPct)
+                ? `${diffPct >= 0 ? "+" : ""}${diffPct.toFixed(1)}%`
+                : "";
+
+            html +=
+                `<br><b>Difference:</b> ` +
+                `${diffKmhText}` +
+                (
+                    diffPctText
+                    ? ` (${diffPctText})`
+                    : ""
+                );
+        }
+
+        if (
+            row.baseline_p25_kmh !== "" &&
+            row.baseline_p75_kmh !== ""
+        ) {
+
+            html +=
+                `<br><b>Middle 50%:</b> ` +
+                `${Number(row.baseline_p25_kmh).toFixed(1)}–` +
+                `${Number(row.baseline_p75_kmh).toFixed(1)} km/h`;
+        }
+
+        html +=
+            `<br><b>Match:</b> ` +
+            `${baselineTypeLabel(row.baseline_type)}`;
+
+        if (row.baseline_days) {
+
+            html +=
+                `<br><b>Historical days:</b> ` +
+                `${row.baseline_days}`;
+        }
+
+        if (row.baseline_label) {
+
+            html +=
+                `<br><b>Sample depth:</b> ` +
+                `${row.baseline_label}`;
+        }
+
+    } else {
+
+        html +=
+            `<br>Baseline unavailable`;
     }
 
 
@@ -503,8 +653,9 @@ modeControl.onAdd = function() {
     div.innerHTML =
         `<b>Display</b><br>` +
         `<select id="display-mode" ` +
-        `style="margin-top:5px; width:145px;">` +
+        `style="margin-top:5px; width:165px;">` +
         `<option value="speed">Current speed</option>` +
+        `<option value="relative">Speed vs normal</option>` +
         `<option value="rain">Recent rainfall</option>` +
         `</select>`;
 
@@ -530,8 +681,8 @@ modeControl.onAdd = function() {
                     trafficStyle
                 );
             }
-	    
-	    updateLegend();
+
+            updateLegend();
         }
     );
 
@@ -601,6 +752,43 @@ function updateLegend() {
             `<span class="legend-line" ` +
             `style="background:#666"></span>` +
             `Rainfall unavailable`;
+
+        return;
+    }
+
+
+    if (displayMode === "relative") {
+
+        legendDiv.innerHTML =
+            `<b>Current speed vs time-matched baseline</b><br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#b2182b"></span>` +
+            `30%+ slower<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#ef8a62"></span>` +
+            `15–30% slower<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#f7f7f7"></span>` +
+            `Within ±15%<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#67a9cf"></span>` +
+            `15–30% faster<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#2166ac"></span>` +
+            `30%+ faster<br><br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#777"></span>` +
+            `No current valid reading<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#555"></span>` +
+            `Baseline unavailable`;
 
         return;
     }
