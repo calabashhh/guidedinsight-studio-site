@@ -1,0 +1,1394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>Hong Kong Live Traffic</title>
+
+<link
+  rel="stylesheet"
+  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+/>
+
+<script
+  src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js">
+</script>
+
+<style>
+
+html, body {
+    height: 100%;
+    margin: 0;
+}
+
+#map {
+    height: 100%;
+    width: 100%;
+}
+
+.info,
+.legend {
+    background: white;
+    padding: 9px 11px;
+    font-family: Arial, sans-serif;
+    font-size: 13px;
+    line-height: 1.45;
+    box-shadow: 0 1px 5px rgba(0,0,0,0.35);
+    border-radius: 4px;
+}
+
+.legend-line {
+    display: inline-block;
+    width: 24px;
+    height: 4px;
+    margin-right: 7px;
+    vertical-align: middle;
+}
+
+.small {
+    font-size: 11px;
+    color: #666;
+}
+
+.extremes-panel {
+    width: 270px;
+    padding: 0;
+    overflow: hidden;
+}
+
+.extremes-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 9px 11px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.extremes-toggle {
+    border: 0;
+    background: transparent;
+    padding: 0;
+    color: #555;
+    font-size: 14px;
+    cursor: pointer;
+}
+
+.extremes-body {
+    border-top: 1px solid #ddd;
+    padding: 9px;
+}
+
+.extremes-tabs {
+    display: grid;
+    grid-template-columns: 1.25fr 1fr 1fr;
+    gap: 4px;
+    margin-bottom: 7px;
+}
+
+.extremes-tab {
+    border: 1px solid #bbb;
+    border-radius: 3px;
+    background: #f4f4f4;
+    padding: 5px 3px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.extremes-tab.active {
+    border-color: #555;
+    background: #555;
+    color: white;
+}
+
+.extremes-list {
+    max-height: 48vh;
+    overflow-y: auto;
+}
+
+.extreme-item {
+    display: block;
+    width: 100%;
+    border: 0;
+    border-top: 1px solid #e5e5e5;
+    background: white;
+    padding: 7px 3px;
+    text-align: left;
+    font-family: Arial, sans-serif;
+    cursor: pointer;
+}
+
+.extreme-item:first-child {
+    border-top: 0;
+}
+
+.extreme-item:hover,
+.extreme-item:focus {
+    background: #f2f2f2;
+    outline: none;
+}
+
+.extreme-item-top {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+.extreme-road {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.extreme-change.slower {
+    color: #b2182b;
+}
+
+.extreme-change.faster {
+    color: #2166ac;
+}
+
+.extreme-detail {
+    margin-top: 2px;
+    color: #666;
+    font-size: 11px;
+}
+
+.extremes-note {
+    margin-top: 7px;
+    padding-top: 7px;
+    border-top: 1px solid #ddd;
+    color: #666;
+    font-size: 10px;
+    line-height: 1.3;
+}
+
+@media (max-width: 600px) {
+    .extremes-panel {
+        width: min(270px, calc(100vw - 30px));
+    }
+
+    .extremes-list {
+        max-height: 34vh;
+    }
+}
+
+</style>
+</head>
+
+<body>
+
+<div id="map"></div>
+
+<script>
+
+const REFRESH_INTERVAL_MS = 120000;
+const STALE_AFTER_MINUTES = 20;
+
+const map = L.map("map").setView(
+    [22.32, 114.17],
+    11
+);
+
+L.tileLayer(
+    "https://basemaps.cartocdn.com/rastertiles/dark_all/{z}/{x}/{y}.png?key=cb1_316i_1_7420184ded0f7b53c5cc16cd",
+    {
+        attribution:
+            '&copy; OpenStreetMap contributors &copy; CARTO'
+    }
+).addTo(map);
+
+
+let trafficState = new Map();
+let trafficLayer = null;
+let latestTrafficTime = null;
+let latestRainTime = null;
+let displayMode = "speed";
+let rankingMode = "absolute";
+let routeLayers = new Map();
+let extremesDiv = null;
+let extremesCollapsed = false;
+
+// ----------------------------------------------------------
+// CSV reader
+// ----------------------------------------------------------
+
+async function loadTrafficState() {
+
+    const response = await fetch(
+        "https://raw.githubusercontent.com/calabashhh/guidedinsight-studio-site/main/traffic_live_state.csv?ts=" + Date.now(),
+        { cache: "no-store" }
+    );
+
+    if (!response.ok) {
+        throw new Error(
+            "Could not load traffic_live_state.csv"
+        );
+    }
+
+    const text = await response.text();
+    const lines = text.trim().split(/\r?\n/);
+
+    const headers = lines[0].split(",");
+    const records = new Map();
+
+    latestTrafficTime = null;
+    latestRainTime = null;
+
+    for (let i = 1; i < lines.length; i++) {
+
+        const values = lines[i].split(",");
+
+        const row = {};
+
+        headers.forEach((header, index) => {
+            row[header] = values[index] ?? "";
+        });
+
+        records.set(
+            String(row.ROUTE_ID),
+            row
+        );
+
+        if (!latestTrafficTime &&
+            row.traffic_date &&
+            row.traffic_time) {
+
+            latestTrafficTime =
+                row.traffic_date +
+                "T" +
+                row.traffic_time +
+                "+08:00";
+        }
+
+        if (!latestRainTime &&
+            row.rain_obs_time) {
+
+            latestRainTime =
+                row.rain_obs_time;
+        }
+    }
+
+    return records;
+}
+
+
+// ----------------------------------------------------------
+// Freshness
+// ----------------------------------------------------------
+
+function trafficAgeMinutes(row) {
+
+    if (!row ||
+        !row.traffic_date ||
+        !row.traffic_time) {
+
+        return Infinity;
+    }
+
+    const observation =
+        new Date(
+            row.traffic_date +
+            "T" +
+            row.traffic_time +
+            "+08:00"
+        );
+
+    return (
+        Date.now() - observation.getTime()
+    ) / 60000;
+}
+
+
+function isTrafficCurrent(row) {
+
+    return (
+        row &&
+        row.valid === "Y" &&
+        trafficAgeMinutes(row) <=
+            STALE_AFTER_MINUTES
+    );
+}
+
+
+// ----------------------------------------------------------
+// Road styling
+// ----------------------------------------------------------
+
+function speedColor(speed) {
+
+    if (speed < 20) return "#b2182b";
+    if (speed < 35) return "#ef8a62";
+    if (speed < 50) return "#fddbc7";
+    if (speed < 70) return "#67a9cf";
+
+    return "#2166ac";
+}
+
+
+function rainColor(rain) {
+
+    if (rain <= 0) return "#ffffff";
+    if (rain < 2) return "#9ecae1";
+    if (rain < 5) return "#6baed6";
+    if (rain < 15) return "#3182bd";
+    if (rain < 30) return "#08519c";
+
+    return "#08306b";
+}
+
+
+function relativeSpeedColor(diffPct) {
+
+    if (diffPct <= -30) return "#b2182b";
+    if (diffPct < -15) return "#ef8a62";
+    if (diffPct <= 15) return "#f7f7f7";
+    if (diffPct < 30) return "#67a9cf";
+
+    return "#2166ac";
+}
+
+
+function trafficStyle(feature) {
+
+    const routeId =
+        String(feature.properties.ROUTE_ID);
+
+    const row =
+        trafficState.get(routeId);
+
+
+    if (displayMode === "rain") {
+
+        if (
+            !row ||
+            row.rain_est_mm_1h === "" ||
+            !Number.isFinite(Number(row.rain_est_mm_1h))
+        ) {
+
+            return {
+                color: "#666",
+                weight: 3,
+                opacity: 0.7
+            };
+        }
+
+        const rain =
+            Number(row.rain_est_mm_1h);
+
+        return {
+            color: rainColor(rain),
+            weight: 3,
+            opacity: 0.95,
+            dashArray: null
+        };
+    }
+
+
+    if (displayMode === "relative") {
+
+        if (!isTrafficCurrent(row)) {
+
+            return {
+                color: "#777",
+                weight: 3,
+                opacity: 0.8
+            };
+        }
+
+        if (
+            row.speed_diff_pct === "" ||
+            !Number.isFinite(Number(row.speed_diff_pct))
+        ) {
+
+            return {
+                color: "#555",
+                weight: 3,
+                opacity: 0.8
+            };
+        }
+
+        const diffPct =
+            Number(row.speed_diff_pct);
+
+        return {
+            color: relativeSpeedColor(diffPct),
+            weight: 3,
+            opacity: 0.95,
+            dashArray: null
+        };
+    }
+
+
+    if (!isTrafficCurrent(row)) {
+
+        return {
+            color: "#888",
+            weight: 3,
+            opacity: 0.8
+        };
+    }
+
+    const speed =
+        Number(row.speed_kmh);
+
+    return {
+        color: speedColor(speed),
+        weight: 3,
+        opacity: 0.95,
+        dashArray: null
+    };
+}
+
+// ----------------------------------------------------------
+// Popup content
+// ----------------------------------------------------------
+
+function baselineTypeLabel(type) {
+
+    if (type === "dow") {
+        return "Same weekday";
+    }
+
+    if (type === "day_type") {
+        return "Weekday/weekend";
+    }
+
+    if (type === "all") {
+        return "All days";
+    }
+
+    return "Unavailable";
+}
+
+
+function formatHktDateTime(value) {
+
+    if (!value) return "Unavailable";
+
+    const date = new Date(value);
+
+    if (Number.isNaN(date.getTime())) {
+        return "Unavailable";
+    }
+
+    return new Intl.DateTimeFormat(
+        "en-GB",
+        {
+            timeZone: "Asia/Hong_Kong",
+            day: "numeric",
+            month: "short",
+            year: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+            hour12: true
+        }
+    )
+        .format(date)
+        .replace(/\b(am|pm)\b/g, value => value.toUpperCase()) +
+        " HKT";
+}
+
+
+function popupContent(feature) {
+
+    const routeId =
+        String(feature.properties.ROUTE_ID);
+
+    const row =
+        trafficState.get(routeId);
+
+    const roadName =
+        feature.properties.STREET_ENAME || "Unnamed road";
+
+
+    let html =
+        `<div style="min-width:220px;">` +
+
+        `<div style="font-size:15px; font-weight:bold; margin-bottom:2px;">` +
+        `${roadName}` +
+        `</div>` +
+
+        `<div style="font-size:11px; color:#666; margin-bottom:8px;">` +
+        `Route ID ${routeId}` +
+        `</div>`;
+
+
+    if (!row) {
+
+        html +=
+            `<b>Traffic</b>` +
+            `<br>Status: No current record` +
+            `</div>`;
+
+        return html;
+    }
+
+
+    const age =
+        trafficAgeMinutes(row);
+
+
+    // ------------------------------------------------------
+    // Traffic
+    // ------------------------------------------------------
+
+    html +=
+        `<div style="border-top:1px solid #ccc; padding-top:6px;">` +
+        `<b>Traffic</b>`;
+
+
+    if (isTrafficCurrent(row)) {
+
+        html +=
+            `<br><b>Current speed:</b> ` +
+            `${row.speed_kmh} km/h`;
+
+        html +=
+            `<br><b>Status:</b> Current`;
+
+    } else {
+
+        html +=
+            `<br><b>Status:</b> ` +
+            (
+                row.valid !== "Y"
+                ? "Reading unavailable"
+                : "Reading stale"
+            );
+
+        if (row.speed_kmh !== "") {
+
+            html +=
+                `<br><b>Last speed:</b> ` +
+                `${row.speed_kmh} km/h`;
+        }
+    }
+
+
+    html +=
+        `<br><b>Observation:</b> ` +
+        `${row.traffic_date} ${row.traffic_time}`;
+
+
+    if (Number.isFinite(age)) {
+
+        html +=
+            `<br><b>Observation age:</b> ` +
+            `${age.toFixed(1)} min`;
+    }
+
+
+    html += `</div>`;
+
+
+    // ------------------------------------------------------
+    // Time-matched baseline
+    // ------------------------------------------------------
+
+    html +=
+        `<div style="border-top:1px solid #ccc; margin-top:7px; padding-top:6px;">` +
+        `<b>Time-matched baseline</b>`;
+
+
+    if (
+        row.baseline_median_kmh !== "" &&
+        Number.isFinite(Number(row.baseline_median_kmh))
+    ) {
+
+        html +=
+            `<br><b>Median speed:</b> ` +
+            `${Number(row.baseline_median_kmh).toFixed(1)} km/h`;
+
+        if (
+            row.speed_diff_kmh !== "" &&
+            Number.isFinite(Number(row.speed_diff_kmh))
+        ) {
+
+            const diffKmh =
+                Number(row.speed_diff_kmh);
+
+            const diffPct =
+                Number(row.speed_diff_pct);
+
+            const diffKmhText =
+                `${diffKmh >= 0 ? "+" : ""}${diffKmh.toFixed(1)} km/h`;
+
+            const diffPctText =
+                Number.isFinite(diffPct)
+                ? `${diffPct >= 0 ? "+" : ""}${diffPct.toFixed(1)}%`
+                : "";
+
+            html +=
+                `<br><b>Difference:</b> ` +
+                `${diffKmhText}` +
+                (
+                    diffPctText
+                    ? ` (${diffPctText})`
+                    : ""
+                );
+        }
+
+        if (
+            row.baseline_p25_kmh !== "" &&
+            row.baseline_p75_kmh !== ""
+        ) {
+
+            html +=
+                `<br><b>Middle 50%:</b> ` +
+                `${Number(row.baseline_p25_kmh).toFixed(1)}–` +
+                `${Number(row.baseline_p75_kmh).toFixed(1)} km/h`;
+        }
+
+        html +=
+            `<br><b>Match:</b> ` +
+            `${baselineTypeLabel(row.baseline_type)}`;
+
+        if (row.baseline_days) {
+
+            html +=
+                `<br><b>Historical days:</b> ` +
+                `${row.baseline_days}`;
+        }
+
+        if (row.baseline_label) {
+
+            html +=
+                `<br><b>Sample depth:</b> ` +
+                `${row.baseline_label}`;
+        }
+
+    } else {
+
+        html +=
+            `<br>Baseline unavailable`;
+    }
+
+
+    html += `</div>`;
+
+
+    // ------------------------------------------------------
+    // Rainfall
+    // ------------------------------------------------------
+
+    html +=
+        `<div style="border-top:1px solid #ccc; margin-top:7px; padding-top:6px;">` +
+        `<b>Rainfall</b>`;
+
+
+    if (
+        row.rain_est_mm_1h !== "" &&
+        Number.isFinite(Number(row.rain_est_mm_1h))
+    ) {
+
+        html +=
+            `<br><b>Estimated past hour:</b> ` +
+            `${Number(row.rain_est_mm_1h).toFixed(1)} mm`;
+
+    } else {
+
+        html +=
+            `<br><b>Estimated past hour:</b> Unavailable`;
+    }
+
+
+    if (row.rain_obs_time) {
+
+        html +=
+            `<br><b>Observation:</b> ` +
+            `${row.rain_obs_time}`;
+    }
+
+
+    if (row.rain_stations_used) {
+
+        html +=
+            `<br><b>Stations used:</b> ` +
+            `${row.rain_stations_used}`;
+    }
+
+
+    html +=
+        `</div>` +
+        `</div>`;
+
+
+    return html;
+}
+
+
+// ----------------------------------------------------------
+// Status control
+// ----------------------------------------------------------
+
+const info = L.control({
+    position: "topright"
+});
+
+info.onAdd = function() {
+
+    this._div =
+        L.DomUtil.create(
+            "div",
+            "info"
+        );
+
+    this.update();
+
+    return this._div;
+};
+
+
+info.update = function() {
+
+    if (!this._div) return;
+
+    let trafficText = "Unavailable";
+    let rainText = "Unavailable";
+
+    if (latestTrafficTime) {
+
+        const d =
+            new Date(latestTrafficTime);
+
+        const age =
+            (Date.now() -
+             d.getTime()) / 60000;
+
+        trafficText =
+            `${formatHktDateTime(latestTrafficTime)}` +
+            `<br>` +
+            `<span class="small">` +
+            `${Math.max(0, Math.round(age))} min old` +
+            `</span>`;
+    }
+
+
+    if (latestRainTime) {
+
+        rainText =
+            formatHktDateTime(latestRainTime);
+    }
+
+
+    this._div.innerHTML =
+        `<b>HK Live Traffic</b>` +
+        `<br><br>` +
+        `<b>Traffic:</b><br>` +
+        trafficText +
+        `<br><br>` +
+        `<b>Rainfall:</b><br>` +
+        rainText +
+        `<br><br>` +
+        `<span class="small">` +
+        `Map refreshes every 2 minutes` +
+        `</span>`;
+};
+
+info.addTo(map);
+
+// ----------------------------------------------------------
+// Display mode control
+// ----------------------------------------------------------
+
+const modeControl = L.control({
+    position: "topleft"
+});
+
+modeControl.onAdd = function() {
+
+    const div =
+        L.DomUtil.create(
+            "div",
+            "info"
+        );
+
+    div.innerHTML =
+        `<b>Display</b><br>` +
+        `<select id="display-mode" ` +
+        `style="margin-top:5px; width:165px;">` +
+        `<option value="speed">Current speed</option>` +
+        `<option value="relative">Speed vs normal</option>` +
+        `<option value="rain">Recent rainfall</option>` +
+        `</select>`;
+
+    L.DomEvent.disableClickPropagation(div);
+    L.DomEvent.disableScrollPropagation(div);
+
+    const select =
+        div.querySelector("#display-mode");
+
+    select.value =
+        displayMode;
+
+    select.addEventListener(
+        "change",
+        function() {
+
+            displayMode =
+                this.value;
+
+            if (trafficLayer) {
+
+                trafficLayer.setStyle(
+                    trafficStyle
+                );
+            }
+
+            updateLegend();
+            updateExtremesPanel();
+        }
+    );
+
+    return div;
+};
+
+modeControl.addTo(map);
+
+// ----------------------------------------------------------
+// Most unusual current segments
+// ----------------------------------------------------------
+
+const extremesControl = L.control({
+    position: "topleft"
+});
+
+extremesControl.onAdd = function() {
+
+    extremesDiv = L.DomUtil.create(
+        "div",
+        "info extremes-panel"
+    );
+
+    L.DomEvent.disableClickPropagation(extremesDiv);
+    L.DomEvent.disableScrollPropagation(extremesDiv);
+
+    updateExtremesPanel();
+
+    return extremesDiv;
+};
+
+extremesControl.addTo(map);
+
+
+function rankedSegments() {
+
+    const rows = [];
+
+    trafficState.forEach((row, routeId) => {
+
+        const diffPct = Number(row.speed_diff_pct);
+        const currentSpeed = Number(row.speed_kmh);
+        const baselineSpeed = Number(row.baseline_median_kmh);
+
+        if (
+            !isTrafficCurrent(row) ||
+            !Number.isFinite(diffPct) ||
+            !Number.isFinite(currentSpeed) ||
+            !Number.isFinite(baselineSpeed) ||
+            baselineSpeed < 10 ||
+            !routeLayers.has(routeId)
+        ) {
+            return;
+        }
+
+        if (rankingMode === "slower" && diffPct >= 0) {
+            return;
+        }
+
+        if (rankingMode === "faster" && diffPct <= 0) {
+            return;
+        }
+
+        const layer = routeLayers.get(routeId);
+
+        rows.push({
+            routeId,
+            layer,
+            roadName:
+                layer.feature.properties.STREET_ENAME ||
+                "Unnamed road",
+            diffPct,
+            currentSpeed,
+            baselineSpeed
+        });
+    });
+
+    rows.sort((a, b) => {
+
+        if (rankingMode === "slower") {
+            return a.diffPct - b.diffPct;
+        }
+
+        if (rankingMode === "faster") {
+            return b.diffPct - a.diffPct;
+        }
+
+        return Math.abs(b.diffPct) - Math.abs(a.diffPct);
+    });
+
+    return rows.slice(0, 10);
+}
+
+
+function focusExtremeSegment(item) {
+
+    const layer = item.layer;
+
+    layer.setStyle({
+        color: "#ffd54a",
+        weight: 7,
+        opacity: 1
+    });
+
+    if (layer.bringToFront) {
+        layer.bringToFront();
+    }
+
+    map.fitBounds(
+        layer.getBounds(),
+        {
+            padding: [45, 45],
+            maxZoom: 16,
+            animate: true
+        }
+    );
+
+    window.setTimeout(() => {
+        layer.openPopup();
+    }, 350);
+
+    window.setTimeout(() => {
+        layer.setStyle(trafficStyle(layer.feature));
+    }, 1800);
+}
+
+
+function updateExtremesPanel() {
+
+    if (!extremesDiv) return;
+
+    extremesDiv.style.display =
+        displayMode === "relative"
+        ? "block"
+        : "none";
+
+    if (displayMode !== "relative") return;
+
+    extremesDiv.innerHTML = "";
+
+    const header = document.createElement("div");
+    header.className = "extremes-header";
+    header.setAttribute("role", "button");
+    header.setAttribute("tabindex", "0");
+    header.setAttribute(
+        "aria-expanded",
+        String(!extremesCollapsed)
+    );
+
+    const title = document.createElement("b");
+    title.textContent = "Largest current deviations";
+
+    const toggle = document.createElement("button");
+    toggle.className = "extremes-toggle";
+    toggle.type = "button";
+    toggle.textContent = extremesCollapsed ? "▾" : "▴";
+    toggle.setAttribute(
+        "aria-label",
+        extremesCollapsed ? "Expand list" : "Collapse list"
+    );
+
+    header.append(title, toggle);
+    extremesDiv.appendChild(header);
+
+    const toggleCollapsed = () => {
+        extremesCollapsed = !extremesCollapsed;
+        updateExtremesPanel();
+    };
+
+    header.addEventListener("click", toggleCollapsed);
+    header.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            toggleCollapsed();
+        }
+    });
+
+    if (extremesCollapsed) return;
+
+    const body = document.createElement("div");
+    body.className = "extremes-body";
+
+    const tabs = document.createElement("div");
+    tabs.className = "extremes-tabs";
+
+    [
+        ["absolute", "Biggest changes"],
+        ["slower", "Slowest"],
+        ["faster", "Fastest"]
+    ].forEach(([value, label]) => {
+
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className =
+            "extremes-tab" +
+            (rankingMode === value ? " active" : "");
+        button.textContent = label;
+
+        button.addEventListener("click", event => {
+            event.stopPropagation();
+            rankingMode = value;
+            updateExtremesPanel();
+        });
+
+        tabs.appendChild(button);
+    });
+
+    body.appendChild(tabs);
+
+    const list = document.createElement("div");
+    list.className = "extremes-list";
+
+    const items = rankedSegments();
+
+    if (!items.length) {
+        const empty = document.createElement("div");
+        empty.className = "small";
+        empty.textContent = "No qualifying current segments.";
+        list.appendChild(empty);
+    }
+
+    items.forEach(item => {
+
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "extreme-item";
+        button.title =
+            `${item.roadName} — Route ID ${item.routeId}`;
+
+        const top = document.createElement("div");
+        top.className = "extreme-item-top";
+
+        const road = document.createElement("span");
+        road.className = "extreme-road";
+        road.textContent = item.roadName;
+
+        const change = document.createElement("span");
+        change.className =
+            "extreme-change " +
+            (item.diffPct < 0 ? "slower" : "faster");
+        change.textContent =
+            `${item.diffPct >= 0 ? "+" : ""}` +
+            `${item.diffPct.toFixed(0)}%`;
+
+        top.append(road, change);
+
+        const detail = document.createElement("div");
+        detail.className = "extreme-detail";
+        detail.textContent =
+            `${item.currentSpeed.toFixed(1)} km/h now · ` +
+            `${item.baselineSpeed.toFixed(1)} km/h normal`;
+
+        button.append(top, detail);
+        button.addEventListener("click", () => {
+            focusExtremeSegment(item);
+        });
+
+        list.appendChild(button);
+    });
+
+    body.appendChild(list);
+
+    const note = document.createElement("div");
+    note.className = "extremes-note";
+    note.textContent =
+        "Valid current readings only; baselines below 10 km/h are excluded.";
+
+    body.appendChild(note);
+    extremesDiv.appendChild(body);
+}
+
+// ----------------------------------------------------------
+// Legend
+// ----------------------------------------------------------
+
+let legendDiv = null;
+
+const legend = L.control({
+    position: "bottomright"
+});
+
+legend.onAdd = function() {
+
+    legendDiv =
+        L.DomUtil.create(
+            "div",
+            "legend"
+        );
+
+    updateLegend();
+
+    return legendDiv;
+};
+
+
+function updateLegend() {
+
+    if (!legendDiv) return;
+
+
+    if (displayMode === "rain") {
+
+        legendDiv.innerHTML =
+            `<b>Estimated rainfall, past hour</b><br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#ffffff"></span>` +
+            `0 mm<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#9ecae1"></span>` +
+            `>0–2 mm<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#6baed6"></span>` +
+            `2–5 mm<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#3182bd"></span>` +
+            `5–15 mm<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#08519c"></span>` +
+            `15–30 mm<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#08306b"></span>` +
+            `30+ mm<br><br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#666"></span>` +
+            `Rainfall unavailable`;
+
+        return;
+    }
+
+
+    if (displayMode === "relative") {
+
+        legendDiv.innerHTML =
+            `<b>Current speed vs time-matched baseline</b><br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#b2182b"></span>` +
+            `30%+ slower<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#ef8a62"></span>` +
+            `15–30% slower<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#f7f7f7"></span>` +
+            `Within ±15%<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#67a9cf"></span>` +
+            `15–30% faster<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#2166ac"></span>` +
+            `30%+ faster<br><br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#777"></span>` +
+            `No current valid reading<br>` +
+
+            `<span class="legend-line" ` +
+            `style="background:#555"></span>` +
+            `Baseline unavailable`;
+
+        return;
+    }
+
+
+    legendDiv.innerHTML =
+        `<b>Current speed</b><br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#b2182b"></span>` +
+        `under 20 km/h<br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#ef8a62"></span>` +
+        `20–35 km/h<br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#fddbc7"></span>` +
+        `35–50 km/h<br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#67a9cf"></span>` +
+        `50–70 km/h<br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#2166ac"></span>` +
+        `70+ km/h<br><br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#777"></span>` +
+        `No current valid reading<br>` +
+
+        `<span class="legend-line" ` +
+        `style="background:#bbb"></span>` +
+        `No live-speed coverage`;
+}
+
+
+legend.addTo(map);
+
+// ----------------------------------------------------------
+// Initial map build
+// ----------------------------------------------------------
+
+async function buildMap() {
+
+    trafficState =
+        await loadTrafficState();
+
+
+    const backgroundResponse =
+        await fetch(
+            "roads_background_simplified_2m.geojson"
+        );
+
+    const backgroundData =
+        await backgroundResponse.json();
+
+
+    L.geoJSON(
+        backgroundData,
+        {
+            style: {
+                color: "#bbbbbb",
+                weight: 0.7,
+                opacity: 0.45
+            },
+
+            interactive: false
+        }
+    ).addTo(map);
+
+
+    const trafficResponse =
+        await fetch(
+            "traffic_overlay.geojson"
+        );
+
+    const trafficData =
+        await trafficResponse.json();
+
+    routeLayers = new Map();
+
+    trafficLayer =
+        L.geoJSON(
+            trafficData,
+            {
+
+                style: trafficStyle,
+
+                onEachFeature:
+                    function(feature, layer) {
+
+                        routeLayers.set(
+                            String(feature.properties.ROUTE_ID),
+                            layer
+                        );
+
+                        layer.bindPopup(
+                            popupContent(feature)
+                        );
+                    }
+            }
+        ).addTo(map);
+
+
+    info.update();
+    updateExtremesPanel();
+}
+
+
+// ----------------------------------------------------------
+// Refresh only changing data
+// ----------------------------------------------------------
+
+async function refreshLiveData() {
+
+    try {
+
+        const newState =
+            await loadTrafficState();
+
+        trafficState =
+            newState;
+
+
+        if (trafficLayer) {
+
+            trafficLayer.eachLayer(
+                function(layer) {
+
+                    layer.setStyle(
+                        trafficStyle(
+                            layer.feature
+                        )
+                    );
+
+                    layer.setPopupContent(
+                        popupContent(
+                            layer.feature
+                        )
+                    );
+                }
+            );
+        }
+
+
+        info.update();
+        updateExtremesPanel();
+
+        console.log(
+            "Live traffic refreshed:",
+            new Date().toISOString()
+        );
+
+    } catch (error) {
+
+        console.error(
+            "Live refresh failed:",
+            error
+        );
+    }
+}
+
+
+// ----------------------------------------------------------
+// Start
+// ----------------------------------------------------------
+
+buildMap().then(() => {
+
+    setInterval(
+        refreshLiveData,
+        REFRESH_INTERVAL_MS
+    );
+
+});
+
+</script>
+
+</body>
+</html>
